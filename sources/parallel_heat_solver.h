@@ -12,6 +12,17 @@
 
 #include "base_heat_solver.h"
 
+#define DEBUG
+#if defined(DEBUG)
+ #define DEBUG_PRINT(rank, fmt, args...) this->mpiPrintf(rank, "[DEBUG] [MPI_Rank %03d] %s:%d:%s(): " fmt, this->m_rank, __FILE__, __LINE__, __func__, ##args)
+#else
+ #define DEBUG_PRINT(rank, fmt, args...) /* Don't do anything in release builds */
+#endif
+
+#define LOCAL_GRID_ON(X, Y) this->localGrid[Y * this->localGridXCount + X]
+#define MPI_ROOT_RANK 0
+#define MPI_ALL_RANKS -1
+
 /**
  * @brief The ParallelHeatSolver class implements parallel MPI based heat
  *        equation solver in 2D using 1D and 2D block grid decomposition.
@@ -48,6 +59,10 @@ public:
     ParallelHeatSolver(SimulationProperties &simulationProps, MaterialProperties &materialProps);
     virtual ~ParallelHeatSolver();
 
+    void Decompose();
+    void mpiPrintf(int who, const char* __restrict__ format, ...);
+    void CreateTypes();
+
     /**
      * @brief Run main simulation loop.
      * @param outResult Output array which is to be filled with computed temperature values.
@@ -61,6 +76,18 @@ public:
 protected:
     int m_rank;     ///< Process rank in global (MPI_COMM_WORLD) communicator.
     int m_size;     ///< Total number of processes in MPI_COMM_WORLD.
+    int m_coords[2];
+
+    int localGridSizes[2];
+    int localGridCounts[2];
+
+    int globalGridSizes[2];
+
+    std::vector<float, AlignedAllocator<float> > localGrid; 
+
+    MPI_Comm     MPIGridComm;
+    MPI_Datatype MPILocalGrid_T;
+    MPI_Datatype MPIGlobalGrid_T;
 };
 
 #endif // PARALLEL_HEAT_SOLVER_H
