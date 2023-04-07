@@ -11,6 +11,12 @@
 
 using namespace std;
 
+#define X 1
+#define Y 0
+
+#define TOTAL_SIZE(A) (A[X] * A[Y])
+#define PTR(ARRAY) &(ARRAY[0])
+
 //============================================================================//
 //                            *** BEGIN: NOTE ***
 //
@@ -58,19 +64,19 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
     this->CreateTypes();
 
     //distribute init data
-    MPI_Scatter(
-        &m_materialProperties.GetDomainParams()[0],
-        1,
-        this->MPIGlobalGrid_T,
-        &this->localGrid[0],
-        this->localGridSizes[0] * this->localGridSizes[1],
-        this->MPILocalGrid_T,
+    MPI_Scatterv(
+        PTR(m_materialProperties.GetDomainParams()),
+        PTR(this->localGridScatterCounts),
+        PTR(this->localGridDisplacement),
+        this->MPILocalGridResized_T,
+        PTR(this->localGrid),
+        TOTAL_SIZE(this->localGridSizes),
+        MPI_FLOAT,
         MPI_ROOT_RANK,
         this->MPIGridComm
     );
 
-    DEBUG_PRINT(MPI_ROOT_RANK, "Scatter done \n",
-    );
+    DEBUG_PRINT(MPI_ROOT_RANK, "Scatter done \n");
 
 }
 
@@ -81,33 +87,41 @@ ParallelHeatSolver::~ParallelHeatSolver()
 
 void ParallelHeatSolver::CreateTypes() {
 
-    int starts[2] = {this->m_coords[0] * this->localGridSizes[0], this->m_coords[1] * this->localGridSizes[1]}; // inital position for all processes
-    MPI_Type_create_subarray(2, &this->globalGridSizes[0], &this->localGridSizes[0], starts, MPI_ORDER_C, MPI_FLOAT, &this->MPILocalGrid_T);
+    int starts[2] = {0, 0}; // inital position for all processes
+    MPI_Type_create_subarray(2, PTR(this->globalGridSizes), PTR(this->localGridSizes), starts, MPI_ORDER_C, MPI_FLOAT, &this->MPILocalGrid_T);
+    MPI_Type_create_resized(this->MPILocalGrid_T, 0, this->localGridSizes[X] * sizeof(float), &this->MPILocalGridResized_T);
     MPI_Type_commit(&this->MPILocalGrid_T);
-    
-    starts[0] = 0; starts[1] = 0;
-    MPI_Type_create_subarray(2, &this->globalGridSizes[0], &this->globalGridSizes[0], starts, MPI_ORDER_C, MPI_FLOAT, &this->MPIGlobalGrid_T);
-    MPI_Type_commit(&this->MPIGlobalGrid_T);
+    MPI_Type_commit(&this->MPILocalGridResized_T);
+
+    //compute displasement for all subarrays
+    this->localGridDisplacement .reserve(TOTAL_SIZE(this->localGridCounts));
+    this->localGridScatterCounts.reserve(TOTAL_SIZE(this->localGridCounts));
+    for (int i = 0; i < TOTAL_SIZE(this->localGridCounts); i++) {
+        this->localGridDisplacement[i]  = i + (i / this->localGridCounts[X]) * (this->localGridSizes[Y] - 1) * this->localGridCounts[X];
+        this->localGridScatterCounts[i] = 1;
+
+        DEBUG_PRINT(MPI_ROOT_RANK, "Calculated displacement for %d submeterix is %d \n", i, this->localGridDisplacement[i]);
+    }
 
 }
 
 void ParallelHeatSolver::Decompose() {
     //set localgrids count to default
-    this->localGridCounts[0] = 1;
-    this->localGridCounts[1] = 1;
+    this->localGridCounts[Y] = 1;
+    this->localGridCounts[X] = 1;
 
     //get localgrids counts
-    m_simulationProperties.GetDecompGrid(this->localGridCounts[0], this->localGridCounts[1]);
+    m_simulationProperties.GetDecompGrid(this->localGridCounts[X], this->localGridCounts[Y]);
 
     //Calculate real localgrids sizes
-    this->localGridSizes[0] = m_materialProperties.GetEdgeSize() / this->localGridCounts[0]; 
-    this->localGridSizes[1] = m_materialProperties.GetEdgeSize() / this->localGridCounts[1];
+    this->localGridSizes[Y] = m_materialProperties.GetEdgeSize() / this->localGridCounts[Y]; 
+    this->localGridSizes[X] = m_materialProperties.GetEdgeSize() / this->localGridCounts[X];
 
     DEBUG_PRINT(MPI_ROOT_RANK, "Calculated decompose is XSize: %d, YSize: %d, XCount: %d, YCount: %d \n",
-        this->localGridSizes[0],
-        this->localGridSizes[1],
-        this->localGridCounts[0],
-        this->localGridCounts[1]
+        this->localGridSizes[Y],
+        this->localGridSizes[X],
+        this->localGridCounts[Y],
+        this->localGridCounts[X]
     );
 
     //distribute generic info between ranks
@@ -115,16 +129,16 @@ void ParallelHeatSolver::Decompose() {
     MPI_Bcast(this->localGridCounts, 2, MPI_INT, MPI_ROOT_RANK, MPI_COMM_WORLD);
 
     //recompute global grid size by local grid info
-    this->globalGridSizes[0] = this->localGridSizes[0] * this->localGridCounts[0];
-    this->globalGridSizes[1] = this->localGridSizes[1] * this->localGridCounts[1];
+    this->globalGridSizes[Y] = this->localGridSizes[Y] * this->localGridCounts[Y];
+    this->globalGridSizes[X] = this->localGridSizes[X] * this->localGridCounts[X];
 
-    DEBUG_PRINT(MPI_ALL_RANKS, "Global grid size is X: %d Y: %d \n", this->globalGridSizes[0], this->globalGridSizes[1]);
+    DEBUG_PRINT(MPI_ALL_RANKS, "Global grid size is X: %d Y: %d \n", this->globalGridSizes[Y], this->globalGridSizes[X]);
 
     //allocate space for localGrid
-    this->localGrid.reserve(this->localGridSizes[0] * this->localGridSizes[1]);
+    this->localGrid.reserve(this->localGridSizes[Y] * this->localGridSizes[X]);
 
     //crate topology
-    int  dims[2]    = {this->localGridCounts[0], this->localGridCounts[1]};
+    int  dims[2]    = {this->localGridCounts[Y], this->localGridCounts[X]};
     int  periods[2] = {false, false}; // no cycle on Y and X
     bool reorder    = true;
 
@@ -133,12 +147,7 @@ void ParallelHeatSolver::Decompose() {
     // Get my coordinates in the new communicator
     MPI_Cart_coords(this->MPIGridComm, this->m_rank, 2, this->m_coords);
 
-    DEBUG_PRINT(MPI_ALL_RANKS, "I am located at (%03d, %03d)\n", this->m_coords[0], this->m_coords[1]);
-
-    //distribute parts between ranks
-    //MPI_Scatter(rand_nums, elements_per_proc, MPI_FLOAT, sub_rand_nums, elements_per_proc, MPI_FLOAT, 0, MPI_COMM_WORLD);
-
-
+    DEBUG_PRINT(MPI_ALL_RANKS, "I am located at (%03d, %03d)\n", this->m_coords[Y], this->m_coords[X]);
 }
 
 void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > &outResult)
@@ -154,15 +163,15 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
     
     // Finally "PrintFinalReport(...)" should be used to print final elapsed time and
     // average temperature in column.
-    
-    //test get it back
-    MPI_Gather(
-        &this->localGrid[0],
-        this->localGridSizes[0] * this->localGridSizes[1],
-        this->MPILocalGrid_T,
-        &outResult[0],
-        this->globalGridSizes[0] * this->globalGridSizes[1],
-        this->MPIGlobalGrid_T,
+
+    MPI_Gatherv(
+        PTR(this->localGrid),
+        this->localGridSizes[Y] * this->localGridSizes[X],
+        MPI_FLOAT,
+        PTR(outResult),
+        PTR(this->localGridScatterCounts),
+        PTR(this->localGridDisplacement),
+        this->MPILocalGridResized_T,
         MPI_ROOT_RANK,
         this->MPIGridComm
     );

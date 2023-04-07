@@ -83,11 +83,13 @@ protected:
 
     int globalGridSizes[2];
 
-    std::vector<float, AlignedAllocator<float> > localGrid; 
+    std::vector<float, AlignedAllocator<float>> localGrid; 
+    std::vector<int, AlignedAllocator<int>>     localGridDisplacement;
+    std::vector<int, AlignedAllocator<int>>     localGridScatterCounts;
 
     MPI_Comm     MPIGridComm;
     MPI_Datatype MPILocalGrid_T;
-    MPI_Datatype MPIGlobalGrid_T;
+    MPI_Datatype MPILocalGridResized_T;
 };
 
 #endif // PARALLEL_HEAT_SOLVER_H
