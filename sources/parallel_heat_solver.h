@@ -62,6 +62,7 @@ public:
     void Decompose();
     void mpiPrintf(int who, const char* __restrict__ format, ...);
     void CreateTypes();
+    int  HaloXCHG(MPI_Request req[8], float* array);
 
     /**
      * @brief Run main simulation loop.
@@ -80,16 +81,29 @@ protected:
 
     int localGridSizes[2];
     int localGridCounts[2];
+    int localGridSizesWithHalo[2];
+
+    bool neighbours[4] = {false, false, false, false};
+    int  neighboursRanks[4];
+    
+    int localGridRowSize;
+    int dataStartPos;
+    int downHeloPos;
 
     int globalGridSizes[2];
 
-    std::vector<float, AlignedAllocator<float>> localGrid; 
+    std::vector<float, AlignedAllocator<float>> localTempGrid; 
+    std::vector<float, AlignedAllocator<float>> localTempGrid2; 
     std::vector<int, AlignedAllocator<int>>     localGridDisplacement;
     std::vector<int, AlignedAllocator<int>>     localGridScatterCounts;
 
+    std::vector<float, AlignedAllocator<float>> localDomainParamsGrid;
+    std::vector<int, AlignedAllocator<int>>     localDomainMapGrid;
+
     MPI_Comm     MPIGridComm;
-    MPI_Datatype MPILocalGrid_T;
+    MPI_Datatype MPILocalGridWithHalo_T;
     MPI_Datatype MPILocalGridResized_T;
+    MPI_Datatype MPILocalINTGridWithHalo_T;
 };
 
 #endif // PARALLEL_HEAT_SOLVER_H
