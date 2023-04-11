@@ -27,9 +27,13 @@ using namespace std;
 
 #define UP_HALO(A)      &(A[0])
 #define DOWN_HALO(A)    &(A[this->downHeloPos])
+#define LEFT_HALO(A)    &(A[0])
+#define RIGHT_HALO(A)   &(A[this->rightHeloPos])
+
 #define FIRST_LINE(A)   &(A[this->dataStartPos])
 #define LAST_2_LINES(A) &(A[this->downHeloPos - this->localGridRowSize * 2])
-
+#define FIRST_COL(A)    FIRST_LINE(A)
+#define LAST_2_COLS(A)  &(A[this->rightHeloPos - 2])
 
 #define TOTAL_SIZE(A) (A[X] * A[Y])
 #define TOTAL_SIZE_WITH_HALO(A) ((A[X] + 2 * HALO_SIZE) * (A[Y] + 2 * HALO_SIZE))
@@ -116,13 +120,31 @@ void ParallelHeatSolver::CreateTypes() {
     MPI_Type_create_subarray(2, (const int[]){this->localGridSizes[Y] + 2 * HALO_SIZE, this->localGridSizes[X] + 2 * HALO_SIZE}, this->localGridSizes, haloStarts, MPI_ORDER_C, MPI_INT, &this->MPILocalINTGridWithHalo_T);
     MPI_Type_commit(&this->MPILocalINTGridWithHalo_T);
 
+    DEBUG_PRINT(MPI_ALL_RANKS, "My submetrix start at (%03d, %03d)\n", haloStarts[Y], haloStarts[X]);
+
     this->localGridSizesWithHalo[X] = this->localGridSizes[X] + haloStarts[X] + (this->neighbours[RIGHT] ? HALO_SIZE : 0);
     this->localGridSizesWithHalo[Y] = this->localGridSizes[Y] + haloStarts[Y] + (this->neighbours[DOWN]  ? HALO_SIZE : 0);
 
     //compute useful indexes
     this->localGridRowSize = this->localGridSizes[X] + 2 * HALO_SIZE;
+    this->localGridColSize = this->localGridSizes[Y] + 2 * HALO_SIZE;
     this->dataStartPos     = this->localGridRowSize * 2;
-    this->downHeloPos      = TOTAL_SIZE(this->localGridSizesWithHalo) - 2 * (this->localGridRowSize * HALO_SIZE);
+    this->downHeloPos      = TOTAL_SIZE_WITH_HALO(this->localGridSizes) - (this->localGridRowSize * (HALO_SIZE + (!this->neighbours[UP]  ? HALO_SIZE : 0)));
+    this->rightHeloPos     = haloStarts[X] + this->localGridSizes[X];
+
+    MPI_Type_contiguous(this->localGridRowSize, MPI_FLOAT, &this->MPILocalGridRow_T);
+    MPI_Type_commit(&this->MPILocalGridRow_T);
+
+    MPI_Type_contiguous(this->localGridRowSize, MPI_INT, &this->MPILocalINTGridRow_T);
+    MPI_Type_commit(&this->MPILocalINTGridRow_T);
+
+    MPI_Type_vector(this->localGridColSize, 1, this->localGridRowSize, MPI_FLOAT, &this->MPILocalGridCol_T);
+    MPI_Type_create_resized(this->MPILocalGridCol_T, 0, 1 * sizeof(float), &this->MPILocalGridCol_T);
+    MPI_Type_commit(&this->MPILocalGridCol_T);
+
+    MPI_Type_vector(this->localGridColSize, 1, this->localGridRowSize, MPI_INT, &this->MPILocalINTGridCol_T);
+    MPI_Type_create_resized(this->MPILocalINTGridCol_T, 0, 1 * sizeof(int), &this->MPILocalINTGridCol_T);
+    MPI_Type_commit(&this->MPILocalINTGridCol_T);
 }
 
 void ParallelHeatSolver::Decompose() {
@@ -177,54 +199,80 @@ void ParallelHeatSolver::Decompose() {
     DEBUG_PRINT(MPI_ALL_RANKS, "I am located at (%03d, %03d)\n", this->m_coords[Y], this->m_coords[X]);
 }
 
-int ParallelHeatSolver::HaloXCHG(MPI_Request req[8], float* array) {
+void ParallelHeatSolver::HaloMaterialXCHG() {
+    int reqCount;
+    MPI_Request req[16];
+    MPI_Status status[16];
 
+    reqCount = this->HaloXCHG(req, this->localDomainParamsGrid.data());
+    MPI_Waitall(reqCount, req, status);
+
+    reqCount = this->HaloINTXCHG(req, this->localDomainMapGrid.data());
+    MPI_Waitall(reqCount, req, status);
+}
+
+int ParallelHeatSolver::HaloINTXCHG(MPI_Request* req, int* array) {
     int reqCount = 0;
 
     if (this->neighbours[UP]) {
-        MPI_Isend(
-            FIRST_LINE(array),
-            this->localGridRowSize * 2,
-            MPI_FLOAT,
-            this->neighboursRanks[UP],
-            NONE_TAG, //put self to tag
-            this->MPIGridComm,
-            &req[reqCount]
-        );
-
-        MPI_Irecv(
-            UP_HALO(array),
-            this->localGridRowSize * 2,
-            MPI_FLOAT,
-            this->neighboursRanks[UP],
-            NONE_TAG,
-            this->MPIGridComm,
-            &req[reqCount + 1]
-        );
+        MPI_Isend(FIRST_LINE(array), 2, this->MPILocalINTGridRow_T, this->neighboursRanks[UP], NONE_TAG, this->MPIGridComm, &req[reqCount]);
+        MPI_Irecv(UP_HALO(array),    2, this->MPILocalINTGridRow_T, this->neighboursRanks[UP], NONE_TAG, this->MPIGridComm, &req[reqCount + 1]);
 
         reqCount += 2;
     }
     
     if (this->neighbours[DOWN]) {
-        MPI_Isend(
-            LAST_2_LINES(array),
-            this->localGridRowSize * 2,
-            MPI_FLOAT,
-            this->neighboursRanks[DOWN],
-            NONE_TAG,
-            this->MPIGridComm,
-            &req[reqCount]
-        );
+        MPI_Isend(LAST_2_LINES(array), 2, this->MPILocalINTGridRow_T, this->neighboursRanks[DOWN], NONE_TAG, this->MPIGridComm, &req[reqCount]);
+        MPI_Irecv(DOWN_HALO(array),    2, this->MPILocalINTGridRow_T, this->neighboursRanks[DOWN], NONE_TAG, this->MPIGridComm, &req[reqCount + 1]);
 
-        MPI_Irecv(
-            DOWN_HALO(array),
-            this->localGridRowSize * 2,
-            MPI_FLOAT,
-            this->neighboursRanks[DOWN],
-            NONE_TAG,
-            this->MPIGridComm,
-            &req[reqCount + 1]
-        );
+        reqCount += 2;
+    }
+
+    if (this->neighbours[LEFT]) {
+        MPI_Isend(FIRST_COL(array), 2, this->MPILocalINTGridCol_T, this->neighboursRanks[LEFT], NONE_TAG, this->MPIGridComm, &req[reqCount]);
+        MPI_Irecv(LEFT_HALO(array), 2, this->MPILocalINTGridCol_T, this->neighboursRanks[LEFT], NONE_TAG, this->MPIGridComm, &req[reqCount + 1]);
+
+        reqCount += 2;
+    }
+
+    if (this->neighbours[RIGHT]) {
+        MPI_Isend(LAST_2_COLS(array), 2, this->MPILocalINTGridCol_T, this->neighboursRanks[RIGHT], NONE_TAG, this->MPIGridComm, &req[reqCount]);
+        MPI_Irecv(RIGHT_HALO(array),  2, this->MPILocalINTGridCol_T, this->neighboursRanks[RIGHT], NONE_TAG, this->MPIGridComm, &req[reqCount + 1]);
+
+        reqCount += 2;
+    }
+
+    return reqCount;
+}
+
+int ParallelHeatSolver::HaloXCHG(MPI_Request*    req, float* array) {
+
+    int reqCount = 0;
+
+    if (this->neighbours[UP]) {
+        MPI_Isend(FIRST_LINE(array), 2, this->MPILocalGridRow_T, this->neighboursRanks[UP], NONE_TAG, this->MPIGridComm, &req[reqCount]);
+        MPI_Irecv(UP_HALO(array),    2, this->MPILocalGridRow_T, this->neighboursRanks[UP], NONE_TAG, this->MPIGridComm, &req[reqCount + 1]);
+
+        reqCount += 2;
+    }
+    
+    if (this->neighbours[DOWN]) {
+        MPI_Isend(LAST_2_LINES(array), 2, this->MPILocalGridRow_T, this->neighboursRanks[DOWN], NONE_TAG, this->MPIGridComm, &req[reqCount]);
+        MPI_Irecv(DOWN_HALO(array),    2, this->MPILocalGridRow_T, this->neighboursRanks[DOWN], NONE_TAG, this->MPIGridComm, &req[reqCount + 1]);
+
+        reqCount += 2;
+    }
+
+    if (this->neighbours[LEFT]) {
+        MPI_Isend(FIRST_COL(array), 2, this->MPILocalGridCol_T, this->neighboursRanks[LEFT], NONE_TAG, this->MPIGridComm, &req[reqCount]);
+        MPI_Irecv(LEFT_HALO(array), 2, this->MPILocalGridCol_T, this->neighboursRanks[LEFT], NONE_TAG, this->MPIGridComm, &req[reqCount + 1]);
+
+        reqCount += 2;
+    }
+
+    if (this->neighbours[RIGHT]) {
+        MPI_Isend(LAST_2_COLS(array), 2, this->MPILocalGridCol_T, this->neighboursRanks[RIGHT], NONE_TAG, this->MPIGridComm, &req[reqCount]);
+        MPI_Irecv(RIGHT_HALO(array),  2, this->MPILocalGridCol_T, this->neighboursRanks[RIGHT], NONE_TAG, this->MPIGridComm, &req[reqCount + 1]);
 
         reqCount += 2;
     }
@@ -295,23 +343,29 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
         this->MPIGridComm
     );
 
+    //exchage halozones material info
+    this->HaloMaterialXCHG();
+
     //send halozones to neighbours
     //if (this->neighbours[LEFT]) 
     //if (this->neighbours[RIGHT])
-
-    MPI_Request req[8];
+    MPI_Request req[16];
     auto reqCount = this->HaloXCHG(req, this->localTempGrid.data());
-    MPI_Status status[8];
+    MPI_Status status[16];
     MPI_Waitall(reqCount, req, status);
+
+    
 
     //copy correctly halozones to second array
     for (unsigned i = 0; i < TOTAL_SIZE_WITH_HALO(this->localGridSizes); i++) {
         this->localTempGrid2[i] = this->localTempGrid[i];
     }
 
+    
+
     float *workTempArrays[] = { this->localTempGrid.data(), this->localTempGrid2.data()};
 
-      // 3. Begin iterative simulation main loop
+    // 3. Begin iterative simulation main loop
     for(size_t iter = 0; iter < intConfig[0]; ++iter) {
         // 4. Compute new temperature for each point in the domain (except borders)
         // border temperatures should remain constant (plus our stencil is +/-2 points).
@@ -322,16 +376,16 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
                     this->localDomainParamsGrid.data(),
                     this->localDomainMapGrid.data(),
                     i, j,
-                    this->localGridSizes[X] + 2 * HALO_SIZE,
+                    this->localGridRowSize,
                     floatConfig[AIR_FLOW],
                     floatConfig[COOLER_TEMP]
                 );
             }
         }
 
-        MPI_Request req[8];
+        MPI_Request req[16];
         auto reqCount = this->HaloXCHG(req, workTempArrays[1]);
-    MPI_Status status[8];
+    MPI_Status status[16];
     MPI_Waitall(reqCount, req, status);
         std::swap(workTempArrays[0], workTempArrays[1]);
     }
