@@ -32,7 +32,7 @@ using namespace std;
 
 #define FIRST_LINE(A)   &(A[this->dataStartPos])
 #define LAST_2_LINES(A) &(A[this->downHeloPos - this->localGridRowSize * 2])
-#define FIRST_COL(A)    FIRST_LINE(A)
+#define FIRST_COL(A)    &(A[this->dataStartColPos])
 #define LAST_2_COLS(A)  &(A[this->rightHeloPos - 2])
 
 #define TOTAL_SIZE(A) (A[X] * A[Y])
@@ -129,6 +129,7 @@ void ParallelHeatSolver::CreateTypes() {
     this->localGridRowSize = this->localGridSizes[X] + 2 * HALO_SIZE;
     this->localGridColSize = this->localGridSizes[Y] + 2 * HALO_SIZE;
     this->dataStartPos     = this->localGridRowSize * 2;
+    this->dataStartColPos  = haloStarts[X];
     this->downHeloPos      = TOTAL_SIZE_WITH_HALO(this->localGridSizes) - (this->localGridRowSize * (HALO_SIZE + (!this->neighbours[UP]  ? HALO_SIZE : 0)));
     this->rightHeloPos     = haloStarts[X] + this->localGridSizes[X];
 
@@ -346,31 +347,29 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
     //exchage halozones material info
     this->HaloMaterialXCHG();
 
-    //send halozones to neighbours
-    //if (this->neighbours[LEFT]) 
-    //if (this->neighbours[RIGHT])
-    MPI_Request req[16];
-    auto reqCount = this->HaloXCHG(req, this->localTempGrid.data());
-    MPI_Status status[16];
-    MPI_Waitall(reqCount, req, status);
+    MPI_Request reqXCHG[16];
+    int         reqCount = 0;
+    
+    reqCount = this->HaloXCHG(reqXCHG, this->localTempGrid.data());
+
+    MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
 
     
 
     //copy correctly halozones to second array
     for (unsigned i = 0; i < TOTAL_SIZE_WITH_HALO(this->localGridSizes); i++) {
         this->localTempGrid2[i] = this->localTempGrid[i];
-    }
-
-    
+    }    
 
     float *workTempArrays[] = { this->localTempGrid.data(), this->localTempGrid2.data()};
 
-    // 3. Begin iterative simulation main loop
+    // Begin iterative simulation main loop
     for(size_t iter = 0; iter < intConfig[0]; ++iter) {
-        // 4. Compute new temperature for each point in the domain (except borders)
-        // border temperatures should remain constant (plus our stencil is +/-2 points).
-        for(size_t i = HALO_SIZE; i < this->localGridSizesWithHalo[Y] - HALO_SIZE; ++i) {
-            for(size_t j = HALO_SIZE; j < this->localGridSizesWithHalo[X] - HALO_SIZE; ++j) {
+
+        //Loop over halo XCHG zones
+        //frist 2 lines
+        for (size_t i = HALO_SIZE;  i < HALO_SIZE * 2; ++i)  {
+            for (size_t j = HALO_SIZE; j < this->localGridSizesWithHalo[X] - HALO_SIZE; ++j) {
                 ComputePoint(
                     workTempArrays[0], workTempArrays[1],
                     this->localDomainParamsGrid.data(),
@@ -383,12 +382,83 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
             }
         }
 
-        MPI_Request req[16];
-        auto reqCount = this->HaloXCHG(req, workTempArrays[1]);
-    MPI_Status status[16];
-    MPI_Waitall(reqCount, req, status);
+        //last 2 lines
+        for (size_t i = this->localGridSizesWithHalo[Y] - HALO_SIZE * 2;  i < this->localGridSizesWithHalo[Y] - HALO_SIZE; ++i)  {
+            for (size_t j = HALO_SIZE; j < this->localGridSizesWithHalo[X] - HALO_SIZE; ++j) {
+                ComputePoint(
+                    workTempArrays[0], workTempArrays[1],
+                    this->localDomainParamsGrid.data(),
+                    this->localDomainMapGrid.data(),
+                    i, j,
+                    this->localGridRowSize,
+                    floatConfig[AIR_FLOW],
+                    floatConfig[COOLER_TEMP]
+                );
+            }
+        }
+
+        //left and right halos
+        for(size_t i = HALO_SIZE * 2; i < this->localGridSizesWithHalo[Y] - HALO_SIZE * 2; ++i) {
+            for (size_t j = HALO_SIZE; j < HALO_SIZE * 2; ++j) {
+                ComputePoint(
+                    workTempArrays[0], workTempArrays[1],
+                    this->localDomainParamsGrid.data(),
+                    this->localDomainMapGrid.data(),
+                    i, j,
+                    this->localGridRowSize,
+                    floatConfig[AIR_FLOW],
+                    floatConfig[COOLER_TEMP]
+                );
+            }
+
+            for (size_t j = this->rightHeloPos - HALO_SIZE; j < this->rightHeloPos; ++j) {
+                ComputePoint(
+                    workTempArrays[0], workTempArrays[1],
+                    this->localDomainParamsGrid.data(),
+                    this->localDomainMapGrid.data(),
+                    i, j,
+                    this->localGridRowSize,
+                    floatConfig[AIR_FLOW],
+                    floatConfig[COOLER_TEMP]
+                );
+            }
+        }
+
+        //Start HALO XCHG
+        reqCount = this->HaloXCHG(reqXCHG, workTempArrays[1]);
+
+
+        // Compute new temperature for each point in the inner domain (except borders + HALO_ZONES)
+        // border temperatures should remain constant (plus our stencil is +/-2 points).
+        for(size_t i = HALO_SIZE * 2; i < this->localGridSizesWithHalo[Y] - HALO_SIZE * 2; ++i) {
+            for(size_t j = HALO_SIZE * 2; j < this->localGridSizesWithHalo[X] - HALO_SIZE * 2; ++j) {
+                ComputePoint(
+                    workTempArrays[0], workTempArrays[1],
+                    this->localDomainParamsGrid.data(),
+                    this->localDomainMapGrid.data(),
+                    i, j,
+                    this->localGridRowSize,
+                    floatConfig[AIR_FLOW],
+                    floatConfig[COOLER_TEMP]
+                );
+            }
+        }
+        
+        //Wait until XCHG is complete
+        MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
+        
         std::swap(workTempArrays[0], workTempArrays[1]);
+
+        //have I middle colum?
+
+        if (this->m_rank == MPI_ROOT_RANK) {
+            PrintProgressReport(iter, 20);
+        }
+
+        // Wait until all sub arrays is done
+        MPI_Barrier(this->MPIGridComm);
     }
+
 
     MPI_Gatherv(
         this->localTempGrid.data(),

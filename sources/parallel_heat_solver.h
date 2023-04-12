@@ -93,6 +93,7 @@ protected:
     int dataStartPos;
     int downHeloPos;
     int rightHeloPos;
+    int dataStartColPos;
 
     int globalGridSizes[2];
 
