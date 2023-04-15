@@ -26,6 +26,40 @@
 #define MPI_ALL_RANKS -1
 #define MPI_COL_ROOT_RANK this->m_coords[X]
 
+#define X 1
+#define Y 0
+#define HALO_SIZE 2
+
+#define UP        0
+#define DOWN      1
+#define LEFT      2
+#define RIGHT     3
+
+#define COOLER_TEMP 1
+#define AIR_FLOW    0
+
+#define ITER_NUM    0
+
+#define HALO_REQ_COUNT 8
+
+#define NONE_TAG 0
+
+#define UP_HALO(A)      &(A[0])
+#define DOWN_HALO(A)    &(A[this->downHeloPos])
+#define LEFT_HALO(A)    &(A[0])
+#define RIGHT_HALO(A)   &(A[this->rightHeloPos])
+
+#define FIRST_LINE(A)   &(A[this->dataStartPos])
+#define LAST_2_LINES(A) &(A[this->downHeloPos - this->localGridRowSize * 2])
+#define FIRST_COL(A)    &(A[this->dataStartColPos])
+#define LAST_2_COLS(A)  &(A[this->rightHeloPos - 2])
+
+#define TOTAL_SIZE(A) (A[X] * A[Y])
+#define TOTAL_SIZE_WITH_HALO(A) ((A[X] + 2 * HALO_SIZE) * (A[Y] + 2 * HALO_SIZE))
+#define GET(X_POS, Y_POS, ARRAY, ROW_SIZE) ARRAY[(Y_POS * ROW_SIZE + X_POS)]
+#define LOCAL_GET(X_POS, Y_POS, ARRAY) GET(X_POS, Y_POS, ARRAY, this->localGridSizes[X])
+#define LOCAL_HALO_GET(X_POS, Y_POS, ARRAY) GET(X_POS, Y_POS, ARRAY, (this->localGridSizes[X] + 2 * HALO_SIZE))
+
 #if SIZE_MAX == UCHAR_MAX
    #define MPI_SIZE_T MPI_UNSIGNED_CHAR
 #elif SIZE_MAX == USHRT_MAX
@@ -45,22 +79,7 @@
  *        equation solver in 2D using 1D and 2D block grid decomposition.
  */
 class ParallelHeatSolver : public BaseHeatSolver
-{
-    //============================================================================//
-    //                            *** BEGIN: NOTE ***
-    //
-    // Modify this class declaration as needed.
-    // This class needs to provide at least:
-    // - Constructor which passes SimulationProperties and MaterialProperties
-    //   to the base class. (see below)
-    // - Implementation of RunSolver method. (see below)
-    // 
-    // It is strongly encouraged to define methods and member variables to improve 
-    // readability of your code!
-    //
-    //                             *** END: NOTE ***
-    //============================================================================//
-    
+{    
 public:
     /**
      * @brief Constructor - Initializes the solver. This should include things like:
@@ -76,15 +95,122 @@ public:
     ParallelHeatSolver(SimulationProperties &simulationProps, MaterialProperties &materialProps);
     virtual ~ParallelHeatSolver();
 
+    /**
+     * Do 1D and 2D decomposition on MPI rank create new CART topology comunicator
+     * compute local, global array sizes and distribute this info between ranks
+     * compute neighbours ranks and create Column comunicator
+     */
     void Decompose();
+
+    /**
+     * C printf routine with selection which rank prints.
+     * @param who    - which rank should print. If -1 then all prints.
+     * @param format - format string.
+     * @param ...    - other parameters.
+     */
     void mpiPrintf(int who, const char* __restrict__ format, ...);
+
+    /**
+     * Create MPI DATA TYPES and cumpute useful array indexes
+     * DATA_TYPES:
+     *      MPI_Datatype MPILocalGridWithHalo_T;
+     *      MPI_Datatype MPILocalGridResized_T;
+     *      MPI_Datatype MPILocalINTGridWithHalo_T;
+     *      MPI_Datatype MPILocalGridRow_T;
+     *      MPI_Datatype MPILocalINTGridRow_T;
+     *      MPI_Datatype MPILocalGridCol_T;
+     *      MPI_Datatype MPILocalINTGridCol_T;
+     * INDEXES:
+     *      localGridDisplacement
+     *      localGridScatterCounts
+     *      localGridSizesWithHalo
+     *      middleCol
+     *      middleColRootRank
+     *      localGridRowSize
+     *      localGridColSize
+     *      dataStartPos
+     *      dataStartColPos
+     *      downHeloPos
+     *      rightHeloPos
+     */
     void CreateTypes();
+
+    /**
+     * Exchage halo regeions of floats with neighbours
+     * @param req   pointer to array to save MPI_Request
+     * @param array array with halos to exchage
+     * @post  need to wait for all req in req after in 
+     *        halozones is actual numbers from neighbours
+     *        and neighbours have actual numbers from array
+     *        in theiers halo zones
+     * @return number of req
+     */
     int  HaloXCHG(MPI_Request* req, float* array);
+
+    /**
+     * Exchage halo regeions of ints with neighbours
+     * @param req   pointer to array to save MPI_Request
+     * @param array array with halos to exchage
+     * @post  need to wait for all req in req after in 
+     *        halozones is actual numbers from neighbours
+     *        and neighbours have actual numbers from array
+     *        in theiers halo zones
+     * @return number of req
+     */
     int  HaloINTXCHG(MPI_Request* req, int* array);
+
+    /**
+     * Exchage halo material info regeions with neighbours
+     * Exchage this->localDomainParamsGrid and this->localDomainMapGrid
+     */
     void HaloMaterialXCHG();
+
+    /**
+     * Compute sum of points in specific col
+     * @param data pointer to array with col
+     * @param index index of start of column
+     * @return sum of column
+     */
     float ComputeColSum(const float *data, int index);
+
+    /**
+     * Init HDF5 file handler and exchage all important information about file
+     * Setuped vars:
+     *  FileNameLen
+     *  FileName
+     *  UseParallelIO
+     *  DiskWriteIntensity
+     *  m_fileHandle
+     */
     void ReserveFile();
-    void SaveToFile(const float *data, size_t iter) ;
+
+    /**
+     * Save state of current iteration to file
+     * auto use seq or par IO mode by this->UseParallelIO
+     * @param data current state to save
+     * @param iter current iteraton number
+     */
+    void SaveToFile(const float *data, size_t iter);
+
+    /**
+     * Compute points whats is in neighbours halo zones
+     * @param workTempArrays pointer to work array (array of two temperature arrays)
+     * @post in workTempArrays[NEW] in points whats is in neighbours halo zones is computed new values
+     */
+    void ComputeHalo(float **workTempArrays);
+
+    /**
+     * Setup simulation for start
+     * Distribute all needed data between all ranks using scatter and bcast
+     * Distributed:
+     *  intConfig              BCAST
+     *  floatConfig            BCAST
+     *  localTempGrid          SCATTER from GetInitTemp()
+     *  localTempGrid2         SCATTER from GetInitTemp()
+     *  localDomainParamsGrid  SCATTER from GetDomainParams()
+     *  localDomainMapGrid     SCATTER form GetDomainMap()
+     */
+    void SetupSolver();
 
     /**
      * @brief Run main simulation loop.
@@ -99,49 +225,51 @@ public:
 protected:
     int m_rank;     ///< Process rank in global (MPI_COMM_WORLD) communicator.
     int m_size;     ///< Total number of processes in MPI_COMM_WORLD.
-    int m_coords[2];
+    int m_coords[2]; ///< position in MPI_CART topologi
 
-    int localGridSizes[2];
-    int localGridCounts[2];
-    int localGridSizesWithHalo[2];
+    int localGridSizes[2]; ///< X Y Size of local array
+    int localGridCounts[2]; ///< X Y Count of ranks in MPI_CART
+    int localGridSizesWithHalo[2]; ///< X Y size of data in local array counted with halo zones
+    float floatConfig[2]; ///< simulation float prameters like air flow and cooler temperature
+    int   intConfig  [2]; ///< simulation int parameter like number of interations
 
-    bool neighbours[4] = {false, false, false, false};
-    int  neighboursRanks[4];
+    bool neighbours[4] = {false, false, false, false}; ///< existence of LEFT RIGHT UP DOWN neighbours
+    int  neighboursRanks[4]; ///< rank ids of LEFT RIGHT UP DOWN neighbours
     
-    int localGridRowSize;
-    int localGridColSize;
-    int dataStartPos;
-    int downHeloPos;
-    int rightHeloPos;
-    int dataStartColPos;
-    int middleCol;
-    int middleColRootRank;
-    int FileNameLen;
+    int localGridRowSize; ///< total size of row in local grid with not used points and halos
+    int localGridColSize; ///< total size of col in local grid with not used points and halos
+    int dataStartPos;     ///< index of start of data in grid (skip HALOS)
+    int downHeloPos;      ///< index of start of down helo
+    int rightHeloPos;     ///< index of start of right helo
+    int dataStartColPos;  ///< index of start of data by column indexing (skip LEFT HALO)
+    int middleCol;        ///< index of absolute middle column in local array if not present -1
+    int middleColRootRank;///< index of root rank of middle column (TOP RANK of column)
+    int FileNameLen;      ///< lenght of output file name 
 
-    bool UseParallelIO = false;
-    size_t DiskWriteIntensity;
+    bool UseParallelIO = false; ///< use parallel IO
+    size_t DiskWriteIntensity; ///< every n interation write to file
 
-    std::string FileName;
+    std::string FileName; ///< name of output file
 
-    int globalGridSizes[2];
+    int globalGridSizes[2]; ///< X Y sizes of global grid
 
-    std::vector<float, AlignedAllocator<float>> localTempGrid; 
-    std::vector<float, AlignedAllocator<float>> localTempGrid2; 
-    std::vector<int, AlignedAllocator<int>>     localGridDisplacement;
-    std::vector<int, AlignedAllocator<int>>     localGridScatterCounts;
+    std::vector<float, AlignedAllocator<float>> localTempGrid; ///< local temp grid
+    std::vector<float, AlignedAllocator<float>> localTempGrid2; ///< local temp grid 2 (for temp work - old and new)
+    std::vector<int, AlignedAllocator<int>>     localGridDisplacement; ///< displcament of local grids in global grid
+    std::vector<int, AlignedAllocator<int>>     localGridScatterCounts; ///< numbes of local grids onranks (all only 1) 
 
-    std::vector<float, AlignedAllocator<float>> localDomainParamsGrid;
-    std::vector<int, AlignedAllocator<int>>     localDomainMapGrid;
+    std::vector<float, AlignedAllocator<float>> localDomainParamsGrid; ///< array with local Domain params
+    std::vector<int, AlignedAllocator<int>>     localDomainMapGrid; ///< array with local domian map
 
-    MPI_Comm     MPIGridComm;
-    MPI_Comm     MPIColComm;
-    MPI_Datatype MPILocalGridWithHalo_T;
-    MPI_Datatype MPILocalGridResized_T;
-    MPI_Datatype MPILocalINTGridWithHalo_T;
-    MPI_Datatype MPILocalGridRow_T;
-    MPI_Datatype MPILocalINTGridRow_T;
-    MPI_Datatype MPILocalGridCol_T;
-    MPI_Datatype MPILocalINTGridCol_T;
+    MPI_Comm     MPIGridComm; ///< CART grid comunicator
+    MPI_Comm     MPIColComm; ///< comunicator for column
+    MPI_Datatype MPILocalGridWithHalo_T; ///< Type of local grid with addition halo zone
+    MPI_Datatype MPILocalGridResized_T; ///< Type of local grid in global grid
+    MPI_Datatype MPILocalINTGridWithHalo_T; ///< Type of local grid with addition halo zone
+    MPI_Datatype MPILocalGridRow_T; ///< Type for local grid row
+    MPI_Datatype MPILocalINTGridRow_T;///< Type for local grid row
+    MPI_Datatype MPILocalGridCol_T; ///< Type for local grid column
+    MPI_Datatype MPILocalINTGridCol_T;///< Type for local grid column
 
     AutoHandle<hid_t> m_fileHandle;                             ///< Output HDF5 file handle.
 };

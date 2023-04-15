@@ -11,52 +11,6 @@
 
 using namespace std;
 
-#define X 1
-#define Y 0
-#define HALO_SIZE 2
-
-#define UP        0
-#define DOWN      1
-#define LEFT      2
-#define RIGHT     3
-
-#define COOLER_TEMP 1
-#define AIR_FLOW    0
-
-#define NONE_TAG 0
-
-#define UP_HALO(A)      &(A[0])
-#define DOWN_HALO(A)    &(A[this->downHeloPos])
-#define LEFT_HALO(A)    &(A[0])
-#define RIGHT_HALO(A)   &(A[this->rightHeloPos])
-
-#define FIRST_LINE(A)   &(A[this->dataStartPos])
-#define LAST_2_LINES(A) &(A[this->downHeloPos - this->localGridRowSize * 2])
-#define FIRST_COL(A)    &(A[this->dataStartColPos])
-#define LAST_2_COLS(A)  &(A[this->rightHeloPos - 2])
-
-#define TOTAL_SIZE(A) (A[X] * A[Y])
-#define TOTAL_SIZE_WITH_HALO(A) ((A[X] + 2 * HALO_SIZE) * (A[Y] + 2 * HALO_SIZE))
-#define GET(X_POS, Y_POS, ARRAY, ROW_SIZE) ARRAY[(Y_POS * ROW_SIZE + X_POS)]
-#define LOCAL_GET(X_POS, Y_POS, ARRAY) GET(X_POS, Y_POS, ARRAY, this->localGridSizes[X])
-#define LOCAL_HALO_GET(X_POS, Y_POS, ARRAY) GET(X_POS, Y_POS, ARRAY, (this->localGridSizes[X] + 2 * HALO_SIZE))
-
-//============================================================================//
-//                            *** BEGIN: NOTE ***
-//
-// Implement methods of your ParallelHeatSolver class here.
-// Freely modify any existing code in ***THIS FILE*** as only stubs are provided 
-// to allow code to compile.
-//
-//                             *** END: NOTE ***
-//============================================================================//
-
-/**
- * C printf routine with selection which rank prints.
- * @param who    - which rank should print. If -1 then all prints.
- * @param format - format string.
- * @param ...    - other parameters.
- */
 void ParallelHeatSolver::mpiPrintf(int who, const char* __restrict__ format, ...) {
     if ((who == MPI_ALL_RANKS) || (who == this->m_rank)) {
         va_list args;
@@ -350,21 +304,83 @@ void ParallelHeatSolver::SaveToFile(const float *data, size_t iter) {
     }
 }
 
-void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > &outResult)
-{
+void ParallelHeatSolver::ComputeHalo(float **workTempArrays) {
+    //first 2 lines
+    for (size_t i = HALO_SIZE;  i < HALO_SIZE * 2; ++i)  {
+        for (size_t j = HALO_SIZE; j < this->localGridSizesWithHalo[X] - HALO_SIZE; ++j) {
+            ComputePoint(
+                workTempArrays[0], workTempArrays[1],
+                this->localDomainParamsGrid.data(),
+                this->localDomainMapGrid.data(),
+                i, j,
+                this->localGridRowSize,
+                this->floatConfig[AIR_FLOW],
+                this->floatConfig[COOLER_TEMP]
+            );
+        }
+    }
+
+    //last 2 lines
+    for (size_t i = this->localGridSizesWithHalo[Y] - HALO_SIZE * 2;  i < this->localGridSizesWithHalo[Y] - HALO_SIZE; ++i)  {
+        for (size_t j = HALO_SIZE; j < this->localGridSizesWithHalo[X] - HALO_SIZE; ++j) {
+            ComputePoint(
+                workTempArrays[0], workTempArrays[1],
+                this->localDomainParamsGrid.data(),
+                this->localDomainMapGrid.data(),
+                i, j,
+                this->localGridRowSize,
+                this->floatConfig[AIR_FLOW],
+                this->floatConfig[COOLER_TEMP]
+            );
+        }
+    }
+
+    //left and right halos
+    for(size_t i = HALO_SIZE * 2; i < this->localGridSizesWithHalo[Y] - HALO_SIZE * 2; ++i) {
+        for (size_t j = HALO_SIZE; j < HALO_SIZE * 2; ++j) {
+            ComputePoint(
+                workTempArrays[0], workTempArrays[1],
+                this->localDomainParamsGrid.data(),
+                this->localDomainMapGrid.data(),
+                i, j,
+                this->localGridRowSize,
+                this->floatConfig[AIR_FLOW],
+                this->floatConfig[COOLER_TEMP]
+            );
+        }
+
+        for (size_t j = this->rightHeloPos - HALO_SIZE; j < this->rightHeloPos; ++j) {
+            ComputePoint(
+                workTempArrays[0], workTempArrays[1],
+                this->localDomainParamsGrid.data(),
+                this->localDomainMapGrid.data(),
+                i, j,
+                this->localGridRowSize,
+                this->floatConfig[AIR_FLOW],
+                this->floatConfig[COOLER_TEMP]
+            );
+        }
+    }
+} 
+
+void ParallelHeatSolver::SetupSolver() {
     //reserve space
     this->localTempGrid        .reserve(TOTAL_SIZE_WITH_HALO(this->localGridSizes));
     this->localTempGrid2       .reserve(TOTAL_SIZE_WITH_HALO(this->localGridSizes));
     this->localDomainParamsGrid.reserve(TOTAL_SIZE_WITH_HALO(this->localGridSizes));
     this->localDomainMapGrid   .reserve(TOTAL_SIZE_WITH_HALO(this->localGridSizes));
 
-    float floatConfig[2] = {m_simulationProperties.GetAirFlowRate(), m_materialProperties.GetCoolerTemp()};
-    int   intConfig  [2] = {m_simulationProperties.GetNumIterations()};
+    // set simulation configs
+    floatConfig[AIR_FLOW]    = m_simulationProperties.GetAirFlowRate();
+    floatConfig[COOLER_TEMP] = m_materialProperties.GetCoolerTemp();
 
-    MPI_Bcast(floatConfig, 2, MPI_FLOAT, MPI_ROOT_RANK, MPI_COMM_WORLD);
-    MPI_Bcast(intConfig,   1, MPI_INT,   MPI_ROOT_RANK, MPI_COMM_WORLD);
+    intConfig[ITER_NUM]      = m_simulationProperties.GetNumIterations();
 
-    //distribute inital data
+    // distribute simulation config between nodes
+    MPI_Bcast(this->floatConfig, 2, MPI_FLOAT, MPI_ROOT_RANK, MPI_COMM_WORLD);
+    MPI_Bcast(this->intConfig,   1, MPI_INT,   MPI_ROOT_RANK, MPI_COMM_WORLD);
+
+    //distribute inital data of material
     MPI_Scatterv(
         m_materialProperties.GetDomainParams().data(),
         this->localGridScatterCounts.data(),
@@ -377,6 +393,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
         this->MPIGridComm
     );
 
+    //distribute inital data of domain map
     MPI_Scatterv(
         m_materialProperties.GetDomainMap().data(),
         this->localGridScatterCounts.data(),
@@ -388,7 +405,8 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
         MPI_ROOT_RANK,
         this->MPIGridComm
     );
-    
+
+    //distribute inital data of init temp
     MPI_Scatterv(
         m_materialProperties.GetInitTemp().data(),
         this->localGridScatterCounts.data(),
@@ -401,93 +419,45 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
         this->MPIGridComm
     );
 
-    //exchage halozones material info
+    //exchage halozones material info between neighbours nodes 
     this->HaloMaterialXCHG();
 
-    MPI_Request reqXCHG[16];
-    int         reqCount = 0;
-    
-    reqCount = this->HaloXCHG(reqXCHG, this->localTempGrid.data());
+    MPI_Request reqXCHG[HALO_REQ_COUNT];    
+    int reqCount = this->HaloXCHG(reqXCHG, this->localTempGrid.data());
 
     MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
 
-    
-
-    //copy correctly halozones to second array
+    //copy correctly to second array
     for (unsigned i = 0; i < TOTAL_SIZE_WITH_HALO(this->localGridSizes); i++) {
         this->localTempGrid2[i] = this->localTempGrid[i];
     }    
 
+}
+
+void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > &outResult)
+{
+    // ready simulator to start
+    this->SetupSolver();
+
     float *workTempArrays[] = { this->localTempGrid.data(), this->localTempGrid2.data()};
 
-    //Note the start time
+    // Note the start time
     double startTime = MPI_Wtime();
-    float  middleColAvgTemp = 0;
+
+    float       middleColAvgTemp = 0;
+    int         reqCount         = 0;
+    MPI_Request reqXCHG[HALO_REQ_COUNT]; 
 
     // Begin iterative simulation main loop
-    for(size_t iter = 0; iter < intConfig[0]; ++iter) {
+    for(size_t iter = 0; iter < intConfig[ITER_NUM]; ++iter) {
 
-        //Loop over halo XCHG zones
-        //frist 2 lines
-        for (size_t i = HALO_SIZE;  i < HALO_SIZE * 2; ++i)  {
-            for (size_t j = HALO_SIZE; j < this->localGridSizesWithHalo[X] - HALO_SIZE; ++j) {
-                ComputePoint(
-                    workTempArrays[0], workTempArrays[1],
-                    this->localDomainParamsGrid.data(),
-                    this->localDomainMapGrid.data(),
-                    i, j,
-                    this->localGridRowSize,
-                    floatConfig[AIR_FLOW],
-                    floatConfig[COOLER_TEMP]
-                );
-            }
-        }
+        // first compute halo
+        this->ComputeHalo(workTempArrays);
 
-        //last 2 lines
-        for (size_t i = this->localGridSizesWithHalo[Y] - HALO_SIZE * 2;  i < this->localGridSizesWithHalo[Y] - HALO_SIZE; ++i)  {
-            for (size_t j = HALO_SIZE; j < this->localGridSizesWithHalo[X] - HALO_SIZE; ++j) {
-                ComputePoint(
-                    workTempArrays[0], workTempArrays[1],
-                    this->localDomainParamsGrid.data(),
-                    this->localDomainMapGrid.data(),
-                    i, j,
-                    this->localGridRowSize,
-                    floatConfig[AIR_FLOW],
-                    floatConfig[COOLER_TEMP]
-                );
-            }
-        }
-
-        //left and right halos
-        for(size_t i = HALO_SIZE * 2; i < this->localGridSizesWithHalo[Y] - HALO_SIZE * 2; ++i) {
-            for (size_t j = HALO_SIZE; j < HALO_SIZE * 2; ++j) {
-                ComputePoint(
-                    workTempArrays[0], workTempArrays[1],
-                    this->localDomainParamsGrid.data(),
-                    this->localDomainMapGrid.data(),
-                    i, j,
-                    this->localGridRowSize,
-                    floatConfig[AIR_FLOW],
-                    floatConfig[COOLER_TEMP]
-                );
-            }
-
-            for (size_t j = this->rightHeloPos - HALO_SIZE; j < this->rightHeloPos; ++j) {
-                ComputePoint(
-                    workTempArrays[0], workTempArrays[1],
-                    this->localDomainParamsGrid.data(),
-                    this->localDomainMapGrid.data(),
-                    i, j,
-                    this->localGridRowSize,
-                    floatConfig[AIR_FLOW],
-                    floatConfig[COOLER_TEMP]
-                );
-            }
-        }
-
-        //Start HALO XCHG
+        // Start HALO XCHG
         reqCount = this->HaloXCHG(reqXCHG, workTempArrays[1]);
 
+        // compute rest of array
         UpdateTile(
             workTempArrays[0], workTempArrays[1],
             this->localDomainParamsGrid.data(),
@@ -501,47 +471,48 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
             floatConfig[COOLER_TEMP]
         );
         
-        //Wait until XCHG is complete
+        // Wait until XCHG is complete
         MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
 
-        //save to file
+        // save to file
         if (this->FileNameLen && (iter % this->DiskWriteIntensity == 0)) this->SaveToFile(workTempArrays[1], iter);
 
-        //have I middle colum? compute temperature in mid col
+        // have I middle colum? compute temperature in mid col
         float globalSum = 0;
         if (this->middleCol != -1) {
-            float localSum  = this->ComputeColSum(workTempArrays[1], this->middleCol);
             
-            DEBUG_PRINT(MPI_ALL_RANKS, "My local temp sum is %f and global is %f\n", localSum, globalSum);
+            float localSum  = this->ComputeColSum(workTempArrays[1], this->middleCol);
             MPI_Reduce(&localSum, &globalSum, 1, MPI_FLOAT, MPI_SUM, MPI_ROOT_RANK, this->MPIColComm);
-            DEBUG_PRINT(MPI_COL_ROOT_RANK, "My global is %f from %d nodes\n", globalSum, this->localGridCounts[Y]);
 
             if (this->m_rank == MPI_COL_ROOT_RANK) {
                 MPI_Send(&globalSum, 1, MPI_FLOAT, MPI_ROOT_RANK, NONE_TAG, this->MPIGridComm);
             }
         }
 
+        // swap work array (old and new)
         std::swap(workTempArrays[0], workTempArrays[1]);
 
+        // print progress on root
         if (this->m_rank == MPI_ROOT_RANK) {
             MPI_Recv(&globalSum, 1, MPI_FLOAT, this->middleColRootRank, NONE_TAG, this->MPIGridComm, MPI_STATUS_IGNORE);
             middleColAvgTemp = globalSum / float(m_materialProperties.GetEdgeSize());
+            
             PrintProgressReport(iter, middleColAvgTemp);
         }
 
-        // Wait until all sub arrays is done
+        // Wait until all sub arrays is done (Not important for beather progress)
         MPI_Barrier(this->MPIGridComm);
     }
 
-    //print results
+    // print results
     if (this->m_rank == MPI_ROOT_RANK) {
         double elapsedTime = MPI_Wtime() - startTime;
         PrintFinalReport(elapsedTime, middleColAvgTemp, "par");
     }
 
-
+    // copy final result to output
     MPI_Gatherv(
-        this->localTempGrid.data(),
+        workTempArrays[0],
         1,
         this->MPILocalGridWithHalo_T,
         outResult.data(),
