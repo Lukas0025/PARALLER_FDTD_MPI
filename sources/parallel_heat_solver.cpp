@@ -103,12 +103,16 @@ void ParallelHeatSolver::ReserveFile() {
     this->UseParallelIO = this->m_simulationProperties.IsUseParallelIO();
 
     MPI_Bcast(&this->UseParallelIO, 1, MPI_CXX_BOOL, MPI_ROOT_RANK, MPI_COMM_WORLD);
+    
+    this->DiskWriteIntensity = this->m_simulationProperties.GetDiskWriteIntensity();
+
+    MPI_Bcast(&this->DiskWriteIntensity, 1, MPI_SIZE_T, MPI_ROOT_RANK, MPI_COMM_WORLD);
 
     if (this->UseParallelIO) {
-        DEBUG_PRINT(MPI_ALL_RANKS, "Setuping paraller IO to file name is %s\n", this->FileName.c_str());
+        DEBUG_PRINT(MPI_ALL_RANKS, "Setuping paraller IO to file name is %s write intensity is %d\n", this->FileName.c_str(), this->DiskWriteIntensity);
         m_fileHandle.Set(H5Fcreate(this->FileName.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT), H5Fclose);
     } else if (this->m_rank == MPI_ROOT_RANK) {
-        DEBUG_PRINT(MPI_ALL_RANKS, "Setuping seq IO to file %s\n", this->FileName.c_str());
+        DEBUG_PRINT(MPI_ALL_RANKS, "Setuping seq IO to file %s write intensity is %d\n", this->FileName.c_str(), this->DiskWriteIntensity);
         m_fileHandle.Set(H5Fcreate(this->FileName.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT), H5Fclose);
     }
 }
@@ -501,7 +505,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
         MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
 
         //save to file
-        if (m_fileHandle != H5I_INVALID_HID && (iter % 10 == 0)) this->SaveToFile(workTempArrays[1], iter);
+        if (this->FileNameLen && (iter % this->DiskWriteIntensity == 0)) this->SaveToFile(workTempArrays[1], iter);
 
         //have I middle colum? compute temperature in mid col
         float globalSum = 0;

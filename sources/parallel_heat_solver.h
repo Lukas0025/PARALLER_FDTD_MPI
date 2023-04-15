@@ -11,6 +11,8 @@
 #define PARALLEL_HEAT_SOLVER_H
 
 #include "base_heat_solver.h"
+#include <stdint.h>
+#include <limits.h>
 
 //#define DEBUG
 #if defined(DEBUG)
@@ -23,6 +25,20 @@
 #define MPI_ROOT_RANK 0
 #define MPI_ALL_RANKS -1
 #define MPI_COL_ROOT_RANK this->m_coords[X]
+
+#if SIZE_MAX == UCHAR_MAX
+   #define MPI_SIZE_T MPI_UNSIGNED_CHAR
+#elif SIZE_MAX == USHRT_MAX
+   #define MPI_SIZE_T MPI_UNSIGNED_SHORT
+#elif SIZE_MAX == UINT_MAX
+   #define MPI_SIZE_T MPI_UNSIGNED
+#elif SIZE_MAX == ULONG_MAX
+   #define MPI_SIZE_T MPI_UNSIGNED_LONG
+#elif SIZE_MAX == ULLONG_MAX
+   #define MPI_SIZE_T MPI_UNSIGNED_LONG_LONG
+#else
+   #error "unable to determinate SIZE_T bit width"
+#endif
 
 /**
  * @brief The ParallelHeatSolver class implements parallel MPI based heat
@@ -103,6 +119,7 @@ protected:
     int FileNameLen;
 
     bool UseParallelIO = false;
+    size_t DiskWriteIntensity;
 
     std::string FileName;
 
