@@ -12,7 +12,7 @@
 
 #include "base_heat_solver.h"
 
-#define DEBUG
+//#define DEBUG
 #if defined(DEBUG)
  #define DEBUG_PRINT(rank, fmt, args...) this->mpiPrintf(rank, "[DEBUG] [MPI_Rank %03d] %s:%d:%s(): " fmt, this->m_rank, __FILE__, __LINE__, __func__, ##args)
 #else
@@ -22,6 +22,7 @@
 #define LOCAL_GRID_ON(X, Y) this->localGrid[Y * this->localGridXCount + X]
 #define MPI_ROOT_RANK 0
 #define MPI_ALL_RANKS -1
+#define MPI_COL_ROOT_RANK this->m_coords[X]
 
 /**
  * @brief The ParallelHeatSolver class implements parallel MPI based heat
@@ -65,6 +66,9 @@ public:
     int  HaloXCHG(MPI_Request* req, float* array);
     int  HaloINTXCHG(MPI_Request* req, int* array);
     void HaloMaterialXCHG();
+    float ComputeColSum(const float *data, int index);
+    void ReserveFile();
+    void SaveToFile(const float *data, size_t iter) ;
 
     /**
      * @brief Run main simulation loop.
@@ -94,6 +98,13 @@ protected:
     int downHeloPos;
     int rightHeloPos;
     int dataStartColPos;
+    int middleCol;
+    int middleColRootRank;
+    int FileNameLen;
+
+    bool UseParallelIO = false;
+
+    std::string FileName;
 
     int globalGridSizes[2];
 
@@ -106,6 +117,7 @@ protected:
     std::vector<int, AlignedAllocator<int>>     localDomainMapGrid;
 
     MPI_Comm     MPIGridComm;
+    MPI_Comm     MPIColComm;
     MPI_Datatype MPILocalGridWithHalo_T;
     MPI_Datatype MPILocalGridResized_T;
     MPI_Datatype MPILocalINTGridWithHalo_T;
@@ -113,6 +125,8 @@ protected:
     MPI_Datatype MPILocalINTGridRow_T;
     MPI_Datatype MPILocalGridCol_T;
     MPI_Datatype MPILocalINTGridCol_T;
+
+    AutoHandle<hid_t> m_fileHandle;                             ///< Output HDF5 file handle.
 };
 
 #endif // PARALLEL_HEAT_SOLVER_H

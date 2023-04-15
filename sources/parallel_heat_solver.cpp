@@ -68,24 +68,15 @@ void ParallelHeatSolver::mpiPrintf(int who, const char* __restrict__ format, ...
 
 ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
                                        MaterialProperties &materialProps)
-    : BaseHeatSolver (simulationProps, materialProps)
+    : BaseHeatSolver (simulationProps, materialProps),
+    m_fileHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t )>(nullptr))
 {
     MPI_Comm_size(MPI_COMM_WORLD, &m_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &m_rank);
     
-    // Creating EMPTY HDF5 handle using RAII "AutoHandle" type
-    //
-    // AutoHandle<hid_t> myHandle(H5I_INVALID_HID, static_cast<void (*)(hid_t )>(nullptr))
-    //
-    // This can be particularly useful when creating handle as class member!
-    // Handle CANNOT be assigned using "=" or copy-constructor, yet it can be set
-    // using ".Set(/* handle */, /* close/free function */)" as in:
-    // myHandle.Set(H5Fopen(...), H5Fclose);
-    
-    // Requested domain decomposition can be queried by
-    // m_simulationProperties.GetDecompGrid(/* TILES IN X */, /* TILES IN Y */)
     this->Decompose();
     this->CreateTypes();
+    this->ReserveFile();
 
     DEBUG_PRINT(MPI_ROOT_RANK, "Init done \n");
 
@@ -94,6 +85,32 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
 ParallelHeatSolver::~ParallelHeatSolver()
 {
 
+}
+
+void ParallelHeatSolver::ReserveFile() {
+    
+    this->FileNameLen = this->m_simulationProperties.GetOutputFileName("par").size();
+
+    MPI_Bcast(&this->FileNameLen, 1, MPI_INT, MPI_ROOT_RANK, MPI_COMM_WORLD);
+
+    if (this->FileNameLen <= 0) return; //no file output
+
+    this->FileName.reserve(this->FileNameLen);
+    this->FileName = this->m_simulationProperties.GetOutputFileName("par");
+    
+    MPI_Bcast(this->FileName.data(), this->FileNameLen, MPI_CHAR, MPI_ROOT_RANK, MPI_COMM_WORLD);
+
+    this->UseParallelIO = this->m_simulationProperties.IsUseParallelIO();
+
+    MPI_Bcast(&this->UseParallelIO, 1, MPI_CXX_BOOL, MPI_ROOT_RANK, MPI_COMM_WORLD);
+
+    if (this->UseParallelIO) {
+        DEBUG_PRINT(MPI_ALL_RANKS, "Setuping paraller IO to file name is %s\n", this->FileName.c_str());
+        m_fileHandle.Set(H5Fcreate(this->FileName.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT), H5Fclose);
+    } else if (this->m_rank == MPI_ROOT_RANK) {
+        DEBUG_PRINT(MPI_ALL_RANKS, "Setuping seq IO to file %s\n", this->FileName.c_str());
+        m_fileHandle.Set(H5Fcreate(this->FileName.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT), H5Fclose);
+    }
 }
 
 void ParallelHeatSolver::CreateTypes() {
@@ -125,13 +142,18 @@ void ParallelHeatSolver::CreateTypes() {
     this->localGridSizesWithHalo[X] = this->localGridSizes[X] + haloStarts[X] + (this->neighbours[RIGHT] ? HALO_SIZE : 0);
     this->localGridSizesWithHalo[Y] = this->localGridSizes[Y] + haloStarts[Y] + (this->neighbours[DOWN]  ? HALO_SIZE : 0);
 
+    int  globalMidCol      = this->globalGridSizes[X] / 2;
+
     //compute useful indexes
-    this->localGridRowSize = this->localGridSizes[X] + 2 * HALO_SIZE;
-    this->localGridColSize = this->localGridSizes[Y] + 2 * HALO_SIZE;
-    this->dataStartPos     = this->localGridRowSize * 2;
-    this->dataStartColPos  = haloStarts[X];
-    this->downHeloPos      = TOTAL_SIZE_WITH_HALO(this->localGridSizes) - (this->localGridRowSize * (HALO_SIZE + (!this->neighbours[UP]  ? HALO_SIZE : 0)));
-    this->rightHeloPos     = haloStarts[X] + this->localGridSizes[X];
+    this->middleCol         = globalMidCol - this->localGridDisplacement[this->m_rank % this->localGridCounts[X]] * this->localGridSizes[X];
+    this->middleCol         = (this->middleCol >= 0 && this->middleCol < this->localGridSizes[X]) ? this->middleCol + (this->neighbours[LEFT] ? HALO_SIZE : 0): -1;
+    this->middleColRootRank = this->localGridCounts[X] / 2;
+    this->localGridRowSize  = this->localGridSizes[X] + 2 * HALO_SIZE;
+    this->localGridColSize  = this->localGridSizes[Y] + 2 * HALO_SIZE;
+    this->dataStartPos      = this->localGridRowSize * 2;
+    this->dataStartColPos   = haloStarts[X];
+    this->downHeloPos       = TOTAL_SIZE_WITH_HALO(this->localGridSizes) - (this->localGridRowSize * (HALO_SIZE + (!this->neighbours[UP]  ? HALO_SIZE : 0)));
+    this->rightHeloPos      = haloStarts[X] + this->localGridSizes[X];
 
     MPI_Type_contiguous(this->localGridRowSize, MPI_FLOAT, &this->MPILocalGridRow_T);
     MPI_Type_commit(&this->MPILocalGridRow_T);
@@ -161,10 +183,10 @@ void ParallelHeatSolver::Decompose() {
     this->localGridSizes[X] = m_materialProperties.GetEdgeSize() / this->localGridCounts[X];
 
     DEBUG_PRINT(MPI_ROOT_RANK, "Calculated decompose is XSize: %d, YSize: %d, XCount: %d, YCount: %d \n",
-        this->localGridSizes[Y],
         this->localGridSizes[X],
-        this->localGridCounts[Y],
-        this->localGridCounts[X]
+        this->localGridSizes[Y],
+        this->localGridCounts[X],
+        this->localGridCounts[Y]
     );
 
     //distribute generic info between ranks
@@ -198,6 +220,10 @@ void ParallelHeatSolver::Decompose() {
     MPI_Cart_shift(this->MPIGridComm, 0, 1, &(this->neighboursRanks[UP]), &(this->neighboursRanks[DOWN]   ));
 
     DEBUG_PRINT(MPI_ALL_RANKS, "I am located at (%03d, %03d)\n", this->m_coords[Y], this->m_coords[X]);
+
+    //create column comunicator
+    //Split the communicator based on the color based on col index
+    MPI_Comm_split(this->MPIGridComm, this->m_coords[X], this->m_rank, &this->MPIColComm);
 }
 
 void ParallelHeatSolver::HaloMaterialXCHG() {
@@ -281,20 +307,47 @@ int ParallelHeatSolver::HaloXCHG(MPI_Request*    req, float* array) {
     return reqCount;
 }
 
+float ParallelHeatSolver::ComputeColSum(const float *data, int index) {
+
+    float tempSum = 0.0f;
+
+    if (index < 0) return tempSum;
+
+    for(size_t i = (this->neighbours[UP] ? HALO_SIZE : 0); i < this->localGridSizesWithHalo[Y] - (this->neighbours[DOWN] ? HALO_SIZE : 0); ++i) {
+        tempSum += data[i * this->localGridRowSize + index];
+    }
+
+    return tempSum;
+}
+
+void ParallelHeatSolver::SaveToFile(const float *data, size_t iter) {
+    if (this->UseParallelIO) {
+
+    } else {
+        //gather the data to ROOT first
+        std::vector<float, AlignedAllocator<float>> outResult;
+        outResult.reserve(TOTAL_SIZE(this->globalGridSizes));
+        
+        MPI_Gatherv(
+            data,
+            1,
+            this->MPILocalGridWithHalo_T,
+            outResult.data(),
+            this->localGridScatterCounts.data(),
+            this->localGridDisplacement.data(),
+            this->MPILocalGridResized_T,
+            MPI_ROOT_RANK,
+            this->MPIGridComm
+        );
+
+        if (this->m_rank == MPI_ROOT_RANK) {
+            StoreDataIntoFile(this->m_fileHandle, iter, outResult.data());
+        }
+    }
+}
+
 void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > &outResult)
 {
-    // UpdateTile(...) method can be used to evaluate heat equation over 2D tile
-    //                 in parallel (using OpenMP).
-    // NOTE: This method might be inefficient when used for small tiles such as 
-    //       2xN or Nx2 (these might arise at edges of the tile)
-    //       In this case ComputePoint may be called directly in loop.
-    
-    // ShouldPrintProgress(N) returns true if average temperature should be reported
-    // by 0th process at Nth time step (using "PrintProgressReport(...)").
-    
-    // Finally "PrintFinalReport(...)" should be used to print final elapsed time and
-    // average temperature in column.
-
     //reserve space
     this->localTempGrid        .reserve(TOTAL_SIZE_WITH_HALO(this->localGridSizes));
     this->localTempGrid2       .reserve(TOTAL_SIZE_WITH_HALO(this->localGridSizes));
@@ -363,6 +416,10 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
 
     float *workTempArrays[] = { this->localTempGrid.data(), this->localTempGrid2.data()};
 
+    //Note the start time
+    double startTime = MPI_Wtime();
+    float  middleColAvgTemp = 0;
+
     // Begin iterative simulation main loop
     for(size_t iter = 0; iter < intConfig[0]; ++iter) {
 
@@ -427,36 +484,55 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
         //Start HALO XCHG
         reqCount = this->HaloXCHG(reqXCHG, workTempArrays[1]);
 
-
-        // Compute new temperature for each point in the inner domain (except borders + HALO_ZONES)
-        // border temperatures should remain constant (plus our stencil is +/-2 points).
-        for(size_t i = HALO_SIZE * 2; i < this->localGridSizesWithHalo[Y] - HALO_SIZE * 2; ++i) {
-            for(size_t j = HALO_SIZE * 2; j < this->localGridSizesWithHalo[X] - HALO_SIZE * 2; ++j) {
-                ComputePoint(
-                    workTempArrays[0], workTempArrays[1],
-                    this->localDomainParamsGrid.data(),
-                    this->localDomainMapGrid.data(),
-                    i, j,
-                    this->localGridRowSize,
-                    floatConfig[AIR_FLOW],
-                    floatConfig[COOLER_TEMP]
-                );
-            }
-        }
+        UpdateTile(
+            workTempArrays[0], workTempArrays[1],
+            this->localDomainParamsGrid.data(),
+            this->localDomainMapGrid.data(),
+            HALO_SIZE * 2,
+            HALO_SIZE * 2,
+            this->localGridSizesWithHalo[X] - HALO_SIZE * 2,
+            this->localGridSizesWithHalo[Y] - HALO_SIZE * 2,
+            this->localGridRowSize,
+            floatConfig[AIR_FLOW],
+            floatConfig[COOLER_TEMP]
+        );
         
         //Wait until XCHG is complete
         MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
-        
+
+        //save to file
+        if (m_fileHandle != H5I_INVALID_HID && (iter % 10 == 0)) this->SaveToFile(workTempArrays[1], iter);
+
+        //have I middle colum? compute temperature in mid col
+        float globalSum = 0;
+        if (this->middleCol != -1) {
+            float localSum  = this->ComputeColSum(workTempArrays[1], this->middleCol);
+            
+            DEBUG_PRINT(MPI_ALL_RANKS, "My local temp sum is %f and global is %f\n", localSum, globalSum);
+            MPI_Reduce(&localSum, &globalSum, 1, MPI_FLOAT, MPI_SUM, MPI_ROOT_RANK, this->MPIColComm);
+            DEBUG_PRINT(MPI_COL_ROOT_RANK, "My global is %f from %d nodes\n", globalSum, this->localGridCounts[Y]);
+
+            if (this->m_rank == MPI_COL_ROOT_RANK) {
+                MPI_Send(&globalSum, 1, MPI_FLOAT, MPI_ROOT_RANK, NONE_TAG, this->MPIGridComm);
+            }
+        }
+
         std::swap(workTempArrays[0], workTempArrays[1]);
 
-        //have I middle colum?
-
         if (this->m_rank == MPI_ROOT_RANK) {
-            PrintProgressReport(iter, 20);
+            MPI_Recv(&globalSum, 1, MPI_FLOAT, this->middleColRootRank, NONE_TAG, this->MPIGridComm, MPI_STATUS_IGNORE);
+            middleColAvgTemp = globalSum / float(m_materialProperties.GetEdgeSize());
+            PrintProgressReport(iter, middleColAvgTemp);
         }
 
         // Wait until all sub arrays is done
         MPI_Barrier(this->MPIGridComm);
+    }
+
+    //print results
+    if (this->m_rank == MPI_ROOT_RANK) {
+        double elapsedTime = MPI_Wtime() - startTime;
+        PrintFinalReport(elapsedTime, middleColAvgTemp, "par");
     }
 
 
