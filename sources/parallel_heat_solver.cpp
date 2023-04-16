@@ -64,7 +64,16 @@ void ParallelHeatSolver::ReserveFile() {
 
     if (this->UseParallelIO) {
         DEBUG_PRINT(MPI_ALL_RANKS, "Setuping paraller IO to file name is %s write intensity is %d\n", this->FileName.c_str(), this->DiskWriteIntensity);
-        m_fileHandle.Set(H5Fcreate(this->FileName.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT), H5Fclose);
+        
+        // Create a property list to open the file using MPI-IO in the MPI_COMM_WORLD communicator.
+        hid_t accesPList = H5Pcreate(H5P_FILE_ACCESS);
+        H5Pset_fapl_mpio(accesPList, MPI_COMM_WORLD, MPI_INFO_NULL);
+
+        // Create a file called (filename) with write permission. Use such a flag that overrides existing file.
+        m_fileHandle.Set(H5Fcreate(this->FileName.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, accesPList), H5Fclose);
+
+        // Close file access list.
+        H5Pclose(accesPList);
     } else if (this->m_rank == MPI_ROOT_RANK) {
         DEBUG_PRINT(MPI_ALL_RANKS, "Setuping seq IO to file %s write intensity is %d\n", this->FileName.c_str(), this->DiskWriteIntensity);
         m_fileHandle.Set(H5Fcreate(this->FileName.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT), H5Fclose);
@@ -272,16 +281,97 @@ float ParallelHeatSolver::ComputeColSum(const float *data, int index) {
     if (index < 0) return tempSum;
 
     for(size_t i = (this->neighbours[UP] ? HALO_SIZE : 0); i < this->localGridSizesWithHalo[Y] - (this->neighbours[DOWN] ? HALO_SIZE : 0); ++i) {
-        tempSum += data[i * this->localGridRowSize + index];
+        tempSum += GET(index, i, data, this->localGridRowSize);
     }
 
     return tempSum;
 }
 
+void ParallelHeatSolver::removeHalos(const float *data, std::vector<float, AlignedAllocator<float>> &outData) {
+    outData.reserve(TOTAL_SIZE(this->localGridSizes));
+
+    size_t gridXStart = (this->neighbours[LEFT] ? HALO_SIZE : 0);
+    size_t gridYStart = (this->neighbours[UP]   ? HALO_SIZE : 0);
+    size_t gridXStop  = this->localGridSizesWithHalo[X] - (this->neighbours[RIGHT] ? HALO_SIZE : 0);
+    size_t gridYStop  = this->localGridSizesWithHalo[Y] - (this->neighbours[DOWN]  ? HALO_SIZE : 0);
+
+    size_t k = 0;
+    for (size_t i = gridYStart;  i < gridYStop; ++i)  {
+        for (size_t j = gridXStart; j < gridXStop; ++j) {
+            outData[k++] = GET(j, i, data, this->localGridRowSize);
+        }
+    }
+}
+
 void ParallelHeatSolver::SaveToFile(const float *data, size_t iter) {
     if (this->UseParallelIO) {
 
+        DEBUG_PRINT(MPI_ROOT_RANK, "Writing to file using paraller IO\n");
+
+        // Create new HDF5 file group named as "Timestep_N", where "N" is number
+        // of current snapshot. The group is placed into root of the file "/Timestep_N".
+        std::string groupName = "Timestep_" + std::to_string(static_cast<unsigned long long>(iter / this->DiskWriteIntensity));
+        AutoHandle<hid_t> groupHandle(H5Gcreate(this->m_fileHandle, groupName.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), H5Gclose);
+
+        {
+            hsize_t hGlobalGridSizes[] = {hsize_t(this->globalGridSizes[Y]), hsize_t(this->globalGridSizes[X])};
+            hsize_t hLocalGridSizes[]  = {hsize_t(this->localGridSizes[Y]),  hsize_t(this->localGridSizes[X])};
+
+            //rank is 2 we have 2D dimensional data
+            hid_t fileSpace = H5Screate_simple(2, hGlobalGridSizes, nullptr);
+            hid_t memSpace  = H5Screate_simple(2, hLocalGridSizes,  nullptr);
+
+            std::string dataSetName("Temperature");
+
+            // Create a dataset
+            hid_t dataset = H5Dcreate(groupHandle, dataSetName.c_str(), H5T_NATIVE_FLOAT, fileSpace, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+            // Compute localgrid offset in 2D dataset
+            hsize_t offset[] = {hsize_t(this->m_coords[Y] * this->localGridSizes[Y]), hsize_t(this->m_coords[X] * this->localGridSizes[X])};
+            
+            H5Sselect_hyperslab(fileSpace, H5S_SELECT_SET, offset, nullptr, hLocalGridSizes, nullptr);
+            
+            // Create XFER property list and set Collective IO.
+            hid_t xferPList = H5Pcreate(H5P_DATASET_XFER);
+            H5Pset_dxpl_mpio(xferPList, H5FD_MPIO_COLLECTIVE);
+
+            // get local grid without HALOS
+            std::vector<float, AlignedAllocator<float>> noHalosLocalGrid;
+            this->removeHalos(data, noHalosLocalGrid);
+
+            // Write data into the dataset.
+            H5Dwrite(dataset, H5T_NATIVE_FLOAT, memSpace, fileSpace, xferPList, noHalosLocalGrid.data());
+            
+            // Close XREF property list.
+            H5Pclose(xferPList);
+
+            // Close spaces
+            H5Sclose(memSpace);
+            H5Sclose(fileSpace);
+            
+            // Close dataset.
+            H5Dclose(dataset);
+        }
+        
+        {
+            // Create Integer attribute in the same group "/Timestep_N/Time"
+            // in which we store number of current simulation iteration.
+            std::string attributeName("Time");
+            
+            // Dataspace is single value/scalar.
+            AutoHandle<hid_t> dataSpaceHandle(H5Screate(H5S_SCALAR), H5Sclose);
+            
+            // Create the attribute in the group as double.
+            AutoHandle<hid_t> attributeHandle(H5Acreate2(groupHandle, attributeName.c_str(), H5T_IEEE_F64LE, dataSpaceHandle, H5P_DEFAULT, H5P_DEFAULT), H5Aclose);
+                                                     
+            // Write value into the attribute.
+            double snapshotTime = double(iter);
+            H5Awrite(attributeHandle, H5T_IEEE_F64LE, &snapshotTime);
+        }
+
     } else {
+        DEBUG_PRINT(MPI_ROOT_RANK, "Writing to file using serial IO\n");
+
         //gather the data to ROOT first
         std::vector<float, AlignedAllocator<float>> outResult;
         outResult.reserve(TOTAL_SIZE(this->globalGridSizes));
@@ -298,6 +388,7 @@ void ParallelHeatSolver::SaveToFile(const float *data, size_t iter) {
             this->MPIGridComm
         );
 
+        //save the data on root
         if (this->m_rank == MPI_ROOT_RANK) {
             StoreDataIntoFile(this->m_fileHandle, iter, outResult.data());
         }

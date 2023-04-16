@@ -14,7 +14,7 @@
 #include <stdint.h>
 #include <limits.h>
 
-//#define DEBUG
+#define DEBUG
 #if defined(DEBUG)
  #define DEBUG_PRINT(rank, fmt, args...) this->mpiPrintf(rank, "[DEBUG] [MPI_Rank %03d] %s:%d:%s(): " fmt, this->m_rank, __FILE__, __LINE__, __func__, ##args)
 #else
@@ -211,6 +211,13 @@ public:
      *  localDomainMapGrid     SCATTER form GetDomainMap()
      */
     void SetupSolver();
+
+    /**
+     * Create new grid with removed hallo from original
+     * @param data pointer to grid with halo zones
+     * @param outData target vector to save new grid without haloZones
+     */
+    void removeHalos(const float *data, std::vector<float, AlignedAllocator<float>> &outData);
 
     /**
      * @brief Run main simulation loop.
