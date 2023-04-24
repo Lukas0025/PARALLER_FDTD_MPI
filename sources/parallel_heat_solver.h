@@ -14,7 +14,7 @@
 #include <stdint.h>
 #include <limits.h>
 
-#define DEBUG
+//#define DEBUG
 #if defined(DEBUG)
  #define DEBUG_PRINT(rank, fmt, args...) this->mpiPrintf(rank, "[DEBUG] [MPI_Rank %03d] %s:%d:%s(): " fmt, this->m_rank, __FILE__, __LINE__, __func__, ##args)
 #else
@@ -53,6 +53,11 @@
 #define LAST_2_LINES(A) &(A[this->downHeloPos - this->localGridRowSize * 2])
 #define FIRST_COL(A)    &(A[this->dataStartColPos])
 #define LAST_2_COLS(A)  &(A[this->rightHeloPos - 2])
+
+#define NEIGHBOUR_UP_HALO      0
+#define NEIGHBOUR_DOWN_HALO    (this->localGridRowSize * ((this->m_coords[Y] > 1 ? HALO_SIZE : 0) + this->localGridSizes[Y]))
+#define NEIGHBOUR_LEFT_HALO    0
+#define NEIGHBOUR_RIGHT_HALO   (this->localGridSizes[X] + (this->m_coords[X] > 1 ? HALO_SIZE : 0))
 
 #define TOTAL_SIZE(A) (A[X] * A[Y])
 #define TOTAL_SIZE_WITH_HALO(A) ((A[X] + 2 * HALO_SIZE) * (A[Y] + 2 * HALO_SIZE))
@@ -218,6 +223,8 @@ public:
      * @param outData target vector to save new grid without haloZones
      */
     void removeHalos(const float *data, std::vector<float, AlignedAllocator<float>> &outData);
+
+    int WindowHaloXCHG(MPI_Win &win, float* array);
 
     /**
      * @brief Run main simulation loop.

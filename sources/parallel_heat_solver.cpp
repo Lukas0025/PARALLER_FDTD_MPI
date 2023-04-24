@@ -119,8 +119,8 @@ void ParallelHeatSolver::CreateTypes() {
     this->localGridColSize  = this->localGridSizes[Y] + 2 * HALO_SIZE;
     this->dataStartPos      = this->localGridRowSize * 2;
     this->dataStartColPos   = haloStarts[X];
-    this->downHeloPos       = TOTAL_SIZE_WITH_HALO(this->localGridSizes) - (this->localGridRowSize * (HALO_SIZE + (!this->neighbours[UP]  ? HALO_SIZE : 0)));
-    this->rightHeloPos      = haloStarts[X] + this->localGridSizes[X];
+    this->downHeloPos       = TOTAL_SIZE_WITH_HALO(this->localGridSizes) - (this->localGridRowSize * (HALO_SIZE + (!this->neighbours[UP]  ? HALO_SIZE : 0))) - (this->neighbours[DOWN] ? 0 : HALO_SIZE);
+    this->rightHeloPos      = haloStarts[X] + this->localGridSizes[X] - (this->neighbours[RIGHT] ? 0 : HALO_SIZE);
 
     MPI_Type_contiguous(this->localGridRowSize, MPI_FLOAT, &this->MPILocalGridRow_T);
     MPI_Type_commit(&this->MPILocalGridRow_T);
@@ -272,6 +272,19 @@ int ParallelHeatSolver::HaloXCHG(MPI_Request*    req, float* array) {
     }
 
     return reqCount;
+}
+
+int ParallelHeatSolver::WindowHaloXCHG(MPI_Win &win, float* array) {
+    if (this->neighbours[UP])
+        MPI_Put(FIRST_LINE(array),   2, this->MPILocalGridRow_T, this->neighboursRanks[UP],    NEIGHBOUR_DOWN_HALO,   2, this->MPILocalGridRow_T, win);
+    if (this->neighbours[DOWN])
+        MPI_Put(LAST_2_LINES(array), 2, this->MPILocalGridRow_T, this->neighboursRanks[DOWN],  NEIGHBOUR_UP_HALO,     2, this->MPILocalGridRow_T, win);
+    if (this->neighbours[LEFT])
+        MPI_Put(FIRST_COL(array),    2, this->MPILocalGridCol_T, this->neighboursRanks[LEFT],  NEIGHBOUR_RIGHT_HALO,  2, this->MPILocalGridCol_T, win);
+    if (this->neighbours[RIGHT])
+        MPI_Put(LAST_2_COLS(array),  2, this->MPILocalGridCol_T, this->neighboursRanks[RIGHT], NEIGHBOUR_LEFT_HALO,   2, this->MPILocalGridCol_T, win);
+
+    return 0;
 }
 
 float ParallelHeatSolver::ComputeColSum(const float *data, int index) {
@@ -527,6 +540,8 @@ void ParallelHeatSolver::SetupSolver() {
 
 void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > &outResult)
 {
+    MPI_Win win;
+
     // ready simulator to start
     this->SetupSolver();
 
@@ -540,21 +555,26 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
     MPI_Request reqXCHG[HALO_REQ_COUNT]; 
 
     // Begin iterative simulation main loop
-    for(size_t iter = 0; iter < intConfig[ITER_NUM]; ++iter) {
+    for(size_t iter = 0; iter < this->intConfig[ITER_NUM]; ++iter) {
+
+        // MPI Window create
+        MPI_Win_create(workTempArrays[1], TOTAL_SIZE_WITH_HALO(this->localGridSizes) * sizeof(float), sizeof(float), MPI_INFO_NULL, this->MPIGridComm, &win);
+        MPI_Win_fence(0, win);
 
         // first compute halo
         this->ComputeHalo(workTempArrays);
 
         // Start HALO XCHG
-        reqCount = this->HaloXCHG(reqXCHG, workTempArrays[1]);
+        //reqCount = this->HaloXCHG(reqXCHG, workTempArrays[1]);
+        reqCount = this->WindowHaloXCHG(win, workTempArrays[1]);
 
         // compute rest of array
         UpdateTile(
             workTempArrays[0], workTempArrays[1],
             this->localDomainParamsGrid.data(),
             this->localDomainMapGrid.data(),
-            HALO_SIZE * 2,
-            HALO_SIZE * 2,
+            HALO_SIZE,
+            HALO_SIZE,
             this->localGridSizesWithHalo[X] - HALO_SIZE * 2,
             this->localGridSizesWithHalo[Y] - HALO_SIZE * 2,
             this->localGridRowSize,
@@ -564,6 +584,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
         
         // Wait until XCHG is complete
         MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
+        MPI_Win_fence(0, win);
 
         // save to file
         if (this->FileNameLen && (iter % this->DiskWriteIntensity == 0)) this->SaveToFile(workTempArrays[1], iter);
@@ -593,6 +614,7 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
 
         // Wait until all sub arrays is done (Not important for beather progress)
         MPI_Barrier(this->MPIGridComm);
+        MPI_Win_free(&win);
     }
 
     // print results
