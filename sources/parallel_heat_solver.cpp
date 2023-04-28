@@ -1,6 +1,6 @@
 /**
  * @file    parallel_heat_solver.cpp
- * @author  xlogin00 <xlogin00@stud.fit.vutbr.cz>
+ * @author  xpleva07 <xpleva07@stud.fit.vutbr.cz>
  *
  * @brief   Course: PPP 2021/2022 - Project 1
  *
@@ -37,8 +37,17 @@ ParallelHeatSolver::ParallelHeatSolver(SimulationProperties &simulationProps,
 }
 
 ParallelHeatSolver::~ParallelHeatSolver()
-{
+{   
+    MPI_Type_free(&this->MPILocalGridResized_T);
+    MPI_Type_free(&this->MPILocalGridWithHalo_T);
+    MPI_Type_free(&this->MPILocalINTGridWithHalo_T);
+    MPI_Type_free(&this->MPILocalGridRow_T);
+    MPI_Type_free(&this->MPILocalINTGridRow_T);
+    MPI_Type_free(&this->MPILocalGridCol_T);
+    MPI_Type_free(&this->MPILocalINTGridCol_T);
 
+    MPI_Comm_free(&this->MPIColComm);
+    MPI_Comm_free(&this->MPIGridComm);
 }
 
 void ParallelHeatSolver::ReserveFile() {
@@ -543,12 +552,21 @@ void ParallelHeatSolver::SetupSolver() {
 
 void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > &outResult)
 {
-    MPI_Win win;
+    MPI_Win winODD;
+    MPI_Win winEVEN;
 
     // ready simulator to start
     this->SetupSolver();
 
     float *workTempArrays[] = { this->localTempGrid.data(), this->localTempGrid2.data()};
+
+    // MPI Window create
+    if (intConfig[RMA_MODE]) {
+        MPI_Win_create(workTempArrays[1], TOTAL_SIZE_WITH_HALO(this->localGridSizes) * sizeof(float), sizeof(float), MPI_INFO_NULL, this->MPIGridComm, &winEVEN);
+        MPI_Win_create(workTempArrays[0], TOTAL_SIZE_WITH_HALO(this->localGridSizes) * sizeof(float), sizeof(float), MPI_INFO_NULL, this->MPIGridComm, &winODD);
+        MPI_Win_fence(0, winODD);
+        MPI_Win_fence(0, winEVEN);
+    }
 
     // Note the start time
     double startTime = MPI_Wtime();
@@ -560,18 +578,12 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
     // Begin iterative simulation main loop
     for(size_t iter = 0; iter < this->intConfig[ITER_NUM]; ++iter) {
 
-        // MPI Window create
-        if (intConfig[RMA_MODE]) {
-            MPI_Win_create(workTempArrays[1], TOTAL_SIZE_WITH_HALO(this->localGridSizes) * sizeof(float), sizeof(float), MPI_INFO_NULL, this->MPIGridComm, &win);
-            MPI_Win_fence(0, win);
-        }
-
         // first compute halo
         this->ComputeHalo(workTempArrays);
 
         // Start HALO XCHG
-        if (intConfig[RMA_MODE])  reqCount = this->WindowHaloXCHG(win, workTempArrays[1]); //use RMA
-        else                     reqCount = this->HaloXCHG(reqXCHG, workTempArrays[1]);   //use P2P
+        if (intConfig[RMA_MODE])  reqCount = this->WindowHaloXCHG((iter % 2 == 0 ? winEVEN : winODD), workTempArrays[1]); //use RMA
+        else                      reqCount = this->HaloXCHG(reqXCHG, workTempArrays[1]);   //use P2P
 
         // compute rest of array
         UpdateTile(
@@ -588,8 +600,8 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
         );
         
         // Wait until XCHG is complete
-        if (intConfig[RMA_MODE])  MPI_Win_fence(0, win);
-        else                     MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
+        if (intConfig[RMA_MODE])  MPI_Win_fence(MPI_MODE_NOSTORE | MPI_MODE_NOPRECEDE, (iter % 2 == 0 ? winEVEN : winODD)); // no local store only PUT from others
+        else                      MPI_Waitall(reqCount, reqXCHG, MPI_STATUS_IGNORE);
 
         // save to file
         if (this->FileNameLen && (iter % this->DiskWriteIntensity == 0)) this->SaveToFile(workTempArrays[1], iter);
@@ -619,7 +631,11 @@ void ParallelHeatSolver::RunSolver(std::vector<float, AlignedAllocator<float> > 
 
         // Wait until all sub arrays is done (Not important for beather progress)
         MPI_Barrier(this->MPIGridComm);
-        if (intConfig[RMA_MODE]) MPI_Win_free(&win);
+    }
+
+    if (intConfig[RMA_MODE]) {
+        MPI_Win_free(&winODD);
+        MPI_Win_free(&winEVEN);
     }
 
     // print results

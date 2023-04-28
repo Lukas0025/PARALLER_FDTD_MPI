@@ -49,7 +49,9 @@
         "sstream": "cpp",
         "stdexcept": "cpp",
         "streambuf": "cpp",
-        "typeinfo": "cpp"
+        "typeinfo": "cpp",
+        "optional": "cpp",
+        "fstream": "cpp"
     },
     "cmake.sourceDirectory": "${workspaceFolder}/sources",
     "cmake.configureOnOpen": false

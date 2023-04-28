@@ -1,9 +1,12 @@
 # Finite-difference time-domain method (FDTD) MPI Implementation
+
 ## Thermal simulation akcelarated on Barbora (IT4I.cz) supercomputer
+
 ### Author: Lukáš Plevač <xpleva07@vutbr.cz>
+
 ### Semetral project to PPP at BUT FIT
 
-## Setup barbora 
+### Setup barbora
 
 Load modules using ml.
 
@@ -12,6 +15,7 @@ Load modules using ml.
 
 ml purge # purge loaded modules
 ml CMake/3.22.1-GCCcore-11.2.0 intel/2021b HDF5/1.12.1-intel-2021b-parallel
+ml Score-P/8.0-iimpi-2021b # pro profilovani
 ```
 
 ## Build project
@@ -28,4 +32,3 @@ make
 eval "$(ssh-agent -s)"
 ssh-add ~/.ssh/git
 ```
-

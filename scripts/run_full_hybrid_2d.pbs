@@ -21,7 +21,7 @@ OUT_FILE_PATH=/scratch/project/dd-22-68/$USER/$PBS_JOBID
 
 # Doplnte vhodne nastavenie Lustre file system #
 ################################################
-
+lfs setstripe -S 1M -c 16 /scratch/project/dd-22-68/$USER
 ################################################
 
 DISK_WRITE_INTENSITY=50
@@ -42,7 +42,7 @@ for procs in ${PROCESSES[*]}; do
             fi
         else
             n_iters=`expr $((20000000/$size))`
-            export OMP_NUM_THREADS=36
+            export OMP_NUM_THREADS=18
             modeP2P=1
             modeRMA=2
         fi

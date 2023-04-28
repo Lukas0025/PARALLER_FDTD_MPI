@@ -1,0 +1,7 @@
+
+mpi_procs;grid_tiles_x;grid_tiles_y;omp_threads;domain_size;n_iterations;disk_write_intensity;airflow;material_file;output_file;simulation_mode;middle_col_avg_temp;total_time;iteration_time
+16;16;1;6;1024;100;50;0.001;input_data_1024.h5;;par;20.7548;0.0348354;0.000348354
+16;4;4;6;1024;100;50;0.001;input_data_1024.h5;;par;20.7548;0.0216188;0.000216188
+mpi_procs;grid_tiles_x;grid_tiles_y;omp_threads;domain_size;n_iterations;disk_write_intensity;airflow;material_file;output_file;simulation_mode;middle_col_avg_temp;total_time;iteration_time
+16;16;1;6;1024;100;50;0.001;input_data_1024.h5;;par;20.7548;0.0333127;0.000333127
+16;4;4;6;1024;100;50;0.001;input_data_1024.h5;;par;20.7548;0.0276589;0.000276589

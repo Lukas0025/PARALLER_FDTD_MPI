@@ -1,6 +1,6 @@
 /**
  * @file    parallel_heat_solver.h
- * @author  xlogin00 <xlogin00@stud.fit.vutbr.cz>
+ * @author  xpleva07 <xpleva07@stud.fit.vutbr.cz>
  *
  * @brief   Course: PPP 2021/2022 - Project 1
  *
@@ -39,6 +39,7 @@
 #define AIR_FLOW    0
 
 #define ITER_NUM    0
+#define RMA_MODE 1
 
 #define HALO_REQ_COUNT 8
 
@@ -224,6 +225,13 @@ public:
      */
     void removeHalos(const float *data, std::vector<float, AlignedAllocator<float>> &outData);
 
+    /**
+     * Exchage halo regeions of float with neighbours using RMA
+     * @param win   MPI_Win for RMA comunication
+     * @param array array with halos to exchage
+     * @post  need to wait for all jobs done using WIN_FENCE
+     * @return alwas 0 as 0 req count
+     */
     int WindowHaloXCHG(MPI_Win &win, float* array);
 
     /**
