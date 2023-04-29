@@ -4,7 +4,8 @@
 
 This repository contains implementation of MPI parallel FDTD on 2D plane with support for 1D and 2D decomposition. Implementing P2P and RMA mode and support hybrid mode with OMP. Output file can by save using seq method (Save on root rank) or par method using HDF5 library.
 
-###### Author: Lukáš Plevač <xpleva07@vutbr.cz> Semetral project to PPP at BUT FIT
+###### Author: Lukáš Plevač <xpleva07@vutbr.cz> 
+###### Semetral project to PPP at BUT FIT
 
 ### Setup HPC
 
