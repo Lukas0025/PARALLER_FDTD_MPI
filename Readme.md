@@ -2,7 +2,9 @@
 
 ## Thermal simulation akcelarated on Barbora (IT4I.cz) supercomputer
 
-This repository contains implementation of MPI parallel FDTD on 2D plane with support for 1D and 2D decomposition. Implementing P2P and RMA mode and support hybrid mode with OMP. Output file can by save using seq method (Save on root rank) or par method using HDF5 library.
+This repository contains implementation of MPI parallel FDTD on 2D plane with support for 1D and 2D decomposition. Implementing P2P and RMA mode and support hybrid mode with OMP. Output file can by save using seq method (Save on root rank) or par method using HDF5 library. Output files (H5 format) can be opend using VISIT tool (https://visit-dav.github.io/visit-website/). Exmaple outputs of this program is in file **outputs**.
+
+![output exmaple](outputs/256x256_par.gif?raw=true)
 
 ###### Author: Lukáš Plevač <xpleva07@vutbr.cz> Semetral project to PPP at BUT FIT
 
@@ -53,6 +55,9 @@ Optional arguments:
 example run:
 
 ```
+# generate material file input_data_1024.h5 for run
+cd scripts && ./generate_data.sh && cd ..
+# run parralel solver on 16 mpi processes
 mpirun -np 16 ./build/ppp_proj01 -m 1 -n 78125 -i scripts/input_data_1024.h5 -d -r hello.png -g
 ```
 
