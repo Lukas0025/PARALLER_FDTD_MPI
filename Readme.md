@@ -6,7 +6,8 @@ This repository contains implementation of MPI parallel FDTD on 2D plane with su
 
 ![output exmaple](outputs/256x256_par.gif?raw=true)
 
-###### Author: Lukáš Plevač <xpleva07@vutbr.cz> Semetral project to PPP at BUT FIT
+###### Author: Lukáš Plevač <xpleva07@vutbr.cz> 
+###### Semetral project to PPP at BUT FIT
 
 ### Setup HPC
 
